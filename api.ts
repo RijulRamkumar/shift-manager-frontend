@@ -5,6 +5,14 @@ import { router } from "expo-router"
 import { Platform } from "react-native"
 
 function getBaseUrl(): string {
+  // Explicit override wins (set via app.json -> expo.extra.apiUrl or EXPO_PUBLIC_API_URL)
+  const configured =
+    (Constants.expoConfig?.extra as { apiUrl?: string } | undefined)?.apiUrl ??
+    process.env.EXPO_PUBLIC_API_URL
+  if (configured) {
+    return configured
+  }
+
   if (Platform.OS === "web") {
     return "http://localhost:8000"
   }
@@ -15,14 +23,22 @@ function getBaseUrl(): string {
     const host = hostUri.split(":")[0]
     return `http://${host}:8000`
   }
-  return "http://192.168.0.132:8000"
+  return "http://localhost:8000"
 }
 
-// const BASE_URL = getBaseUrl()
-const BASE_URL = "http://192.168.0.132:8000";
+const BASE_URL = getBaseUrl()
 
 export const api = axios.create({
   baseURL: BASE_URL,
+});
+
+// Attach the stored access token to every outgoing request.
+api.interceptors.request.use(async (config) => {
+  const token = await AsyncStorage.getItem("accessToken");
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
 });
 
 api.interceptors.response.use(
@@ -58,3 +74,9 @@ api.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
+// Clear stored credentials and return to the login screen.
+export async function logout() {
+  await AsyncStorage.multiRemove(["accessToken", "refreshToken", "userRole"]);
+  router.replace("/login");
+}

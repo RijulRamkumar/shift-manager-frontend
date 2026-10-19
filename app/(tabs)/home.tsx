@@ -17,9 +17,7 @@ export default function HomeRouter() {
     // Cast to UserRole only if valid, else null
     const role: UserRole | null =
       stored === "employee" || stored === "admin_staff" || stored === "admin" ? stored : null;
-  
-    console.log(role);
-  
+
     setRole(role);
     setLoading(false);
   };
@@ -35,9 +33,6 @@ export default function HomeRouter() {
       </View>
     );
   }
-
-  console.log(role);
-  
 
   return role === "admin" || role === "admin_staff" ? <AdminHomeScreen /> : <HomeScreen />;
 }

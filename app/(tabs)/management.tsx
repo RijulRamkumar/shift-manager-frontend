@@ -1,835 +1,928 @@
-import { View, Text, ScrollView, TouchableOpacity, Modal, Alert, ActivityIndicator, TextInput } from "react-native";
-import { useState, useEffect, useCallback } from "react";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import { Picker } from "@react-native-picker/picker";
-import DateTimePicker from "@react-native-community/datetimepicker";
-import { api } from "../../api";
+import {
+  View, Text, ScrollView, TouchableOpacity, Modal, Alert,
+  ActivityIndicator, TextInput, RefreshControl, StyleSheet, Pressable, FlatList, Dimensions,
+} from "react-native"
+import { useState, useEffect, useCallback } from "react"
+import AsyncStorage from "@react-native-async-storage/async-storage"
+import DateTimePicker from "@react-native-community/datetimepicker"
+import dayjs from "dayjs"
+import utc from "dayjs/plugin/utc"
+import timezone from "dayjs/plugin/timezone"
+dayjs.extend(utc)
+dayjs.extend(timezone)
+import * as Haptics from "expo-haptics"
+import {
+  ArrowLeftRight, Calendar, Clock, CheckCircle, XCircle,
+  ChevronRight, ChevronDown, Plus, Users, Sun, Moon, Sunset,
+} from "lucide-react-native"
+import { api } from "../../api"
+import { Colors, Shadow, StatusColors } from "../../constants/theme"
 
 interface Shift {
-  id: number;
-  start: string;
-  end: string;
-  shift_type: string;
-  department_name: string;
+  id: number; start: string; end: string; shift_type: string; department?: string
 }
-
 interface ShiftAssignment {
-  id: number;
-  shift: Shift;
+  id: number; shift: Shift; employee_id?: number; employee_name?: string
 }
-
 interface TimeOffRequest {
-  id: number;
-  employee_name: string;
-  time_off_type: string;
-  start_date: string;
-  end_date: string;
-  status: string;
-  reason?: string;
-  approved_by_name?: string;
+  id: number; employee_name: string; time_off_type: string
+  start_date: string; end_date: string; status: string; reason?: string
+}
+interface ShiftSwapRequest {
+  id: number; requester_name: string; target_name: string; status: string; reason?: string
+  requester_shift_info: { shift_type: string; start: string; end: string; department: string }
+  target_shift_info: { shift_type: string; start: string; end: string; department: string }
 }
 
-interface ShiftSwapRequest {
-  id: number;
-  requester_name: string;
-  target_name: string;
-  status: string;
-  reason?: string;
-  requester_shift_info: {
-    shift_type: string;
-    start: string;
-    end: string;
-    department: string;
-  };
-  target_shift_info: {
-    shift_type: string;
-    start: string;
-    end: string;
-    department: string;
-  };
+function StatusBadge({ status }: { status: string }) {
+  const cfg = StatusColors[status] ?? { bg: Colors.background, text: Colors.textSecondary }
+  const label = status.charAt(0).toUpperCase() + status.slice(1)
+  return (
+    <View style={[styles.badge, { backgroundColor: cfg.bg }]}>
+      <Text style={[styles.badgeText, { color: cfg.text }]}>{label}</Text>
+    </View>
+  )
+}
+
+function Initials({ name, size = 36 }: { name: string; size?: number }) {
+  const parts = name.trim().split(" ")
+  const initials = parts.length >= 2 ? `${parts[0][0]}${parts[parts.length - 1][0]}` : name.slice(0, 2)
+  return (
+    <View style={[styles.initialsCircle, { width: size, height: size, borderRadius: size / 2 }]}>
+      <Text style={styles.initialsText}>{initials.toUpperCase()}</Text>
+    </View>
+  )
+}
+
+function SectionDivider() {
+  return <View style={styles.sectionDivider} />
 }
 
 export default function ManagementScreen() {
-  const [userRole, setUserRole] = useState<string>("");
+  const [userRole, setUserRole] = useState("")
+  const [tz, setTz] = useState("UTC")
+  const [showSwapModal, setShowSwapModal] = useState(false)
+  const [showTimeOffModal, setShowTimeOffModal] = useState(false)
+  const [selectedSwapDetail, setSelectedSwapDetail] = useState<ShiftSwapRequest | null>(null)
+  const [userShifts, setUserShifts] = useState<ShiftAssignment[]>([])
+  const [timeOffRequests, setTimeOffRequests] = useState<TimeOffRequest[]>([])
+  const [outgoingSwapRequests, setOutgoingSwapRequests] = useState<ShiftSwapRequest[]>([])
+  const [incomingSwapRequests, setIncomingSwapRequests] = useState<ShiftSwapRequest[]>([])
+  const [allSwapRequests, setAllSwapRequests] = useState<ShiftSwapRequest[]>([])
+  const [targetShifts, setTargetShifts] = useState<ShiftAssignment[]>([])
+  const [selectedMyShift, setSelectedMyShift] = useState<string | null>(null)
+  const [selectedTargetShift, setSelectedTargetShift] = useState<string | null>(null)
+  const [swapReason, setSwapReason] = useState("")
+  const [timeOffType, setTimeOffType] = useState("annual_leave")
+  const [startDate, setStartDate] = useState<Date | null>(null)
+  const [endDate, setEndDate] = useState<Date | null>(null)
+  const [timeOffReason, setTimeOffReason] = useState("")
+  const [showStartPicker, setShowStartPicker] = useState(false)
+  const [showEndPicker, setShowEndPicker] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [loadingSwaps, setLoadingSwaps] = useState(false)
+  const [showLeaveSheet, setShowLeaveSheet] = useState(false)
+  const [showMyShiftSheet, setShowMyShiftSheet] = useState(false)
+  const [showTargetShiftSheet, setShowTargetShiftSheet] = useState(false)
 
-  // Modals
-  const [showSwapModal, setShowSwapModal] = useState(false);
-  const [showTimeOffModal, setShowTimeOffModal] = useState(false);
-  const [showSwapDetailModal, setShowSwapDetailModal] = useState(false);
-  const [selectedSwapDetail, setSelectedSwapDetail] = useState<ShiftSwapRequest | null>(null);
-
-  // Data states
-  const [userShifts, setUserShifts] = useState<ShiftAssignment[]>([]);
-  const [timeOffRequests, setTimeOffRequests] = useState<TimeOffRequest[]>([]);
-  const [outgoingSwapRequests, setOutgoingSwapRequests] = useState<ShiftSwapRequest[]>([]);
-  const [incomingSwapRequests, setIncomingSwapRequests] = useState<ShiftSwapRequest[]>([]);
-  const [allSwapRequests, setAllSwapRequests] = useState<ShiftSwapRequest[]>([]);
-  const [targetShifts, setTargetShifts] = useState<ShiftAssignment[]>([]);
-
-  // Form states
-  const [selectedMyShiftAssignment, setSelectedMyShiftAssignment] = useState<string | null>(null);
-  const [selectedTargetShiftAssignment, setSelectedTargetShiftAssignment] = useState<string | null>(null);
-  const [swapReason, setSwapReason] = useState("");
-  const [showMyShiftPicker, setShowMyShiftPicker] = useState(false);
-
-  // Time off form
-  const [timeOffType, setTimeOffType] = useState("annual_leave");
-  const [startDate, setStartDate] = useState<Date | null>(null);
-  const [endDate, setEndDate] = useState<Date | null>(null);
-  const [timeOffReason, setTimeOffReason] = useState("");
-  const [showStartDatePicker, setShowStartDatePicker] = useState(false);
-  const [showEndDatePicker, setShowEndDatePicker] = useState(false);
-
-  // Loading states
-  const [loading, setLoading] = useState(false);
-  const [loadingSwaps, setLoadingSwaps] = useState(false);
-
-  // Get user role from storage
   useEffect(() => {
-    AsyncStorage.getItem("userRole").then((role) => {
-      if (role) setUserRole(role);
-    });
-  }, []);
+    AsyncStorage.getItem("userRole").then((r) => { if (r) setUserRole(r) })
+    AsyncStorage.getItem("hospitalTimezone").then((v) => { if (v) setTz(v) })
+  }, [])
 
-  // Fetch all data
   const fetchAllData = useCallback(async () => {
     try {
-      setLoading(true);
+      setLoading(true)
       const [shiftsRes, timeOffRes, swapsRes] = await Promise.all([
         api.get("/shifts/"),
         api.get("/time-off-requests/"),
         api.get("/shifts/swap-requests/"),
-      ]);
-
-      setUserShifts(shiftsRes.data || []);
-      setTimeOffRequests(timeOffRes.data || []);
-
+      ])
+      setUserShifts(shiftsRes.data || [])
+      setTimeOffRequests(timeOffRes.data || [])
       if (userRole && ["admin", "admin_staff"].includes(userRole)) {
-        setAllSwapRequests(swapsRes.data.incoming || []);
+        setAllSwapRequests(swapsRes.data.incoming || [])
       } else {
-        setOutgoingSwapRequests(swapsRes.data.outgoing || []);
-        setIncomingSwapRequests(swapsRes.data.incoming || []);
+        setOutgoingSwapRequests(swapsRes.data.outgoing || [])
+        setIncomingSwapRequests(swapsRes.data.incoming || [])
       }
-    } catch (err) {
-      console.error("Failed to fetch data", err);
-      Alert.alert("Error", "Failed to load data");
+    } catch {
+      Alert.alert("Error", "Failed to load data")
     } finally {
-      setLoading(false);
+      setLoading(false)
     }
-  }, [userRole]);
+  }, [userRole])
 
-  useEffect(() => {
-    fetchAllData();
-  }, [fetchAllData]);
+  useEffect(() => { fetchAllData() }, [fetchAllData])
 
-  // Fetch target shifts for swap
-  useEffect(() => {
-    const fetchAvailableShifts = async () => {
-      try {
-        const res = await api.get("/shifts/available/");
-        setTargetShifts(res.data || []);
-      } catch (err) {
-        console.error("Failed to fetch available shifts", err);
-      }
-    };
-    fetchAvailableShifts();
-  }, []);
+  const fetchAvailableShifts = useCallback(async () => {
+    try {
+      const res = await api.get("/shifts/available/")
+      setTargetShifts(res.data || [])
+    } catch {}
+  }, [])
+
+  useEffect(() => { fetchAvailableShifts() }, [fetchAvailableShifts])
+
+  const isAdmin = ["admin", "admin_staff"].includes(userRole)
 
   const handleCreateSwap = async () => {
-    if (!selectedMyShiftAssignment || !selectedTargetShiftAssignment) {
-      Alert.alert("Error", "Please select both shifts");
-      return;
+    if (!selectedMyShift || !selectedTargetShift) {
+      Alert.alert("Error", "Please select both shifts"); return
     }
-
     try {
-      setLoadingSwaps(true);
+      setLoadingSwaps(true)
       await api.post("/shifts/swap-request/", {
-        requester_assignment_id: selectedMyShiftAssignment,
-        target_assignment_id: selectedTargetShiftAssignment,
+        requester_assignment_id: selectedMyShift,
+        target_assignment_id: selectedTargetShift,
         reason: swapReason,
-      });
-
-      Alert.alert("Success", "Shift swap request created");
-      setShowSwapModal(false);
-      setSelectedMyShiftAssignment(null);
-      setSelectedTargetShiftAssignment(null);
-      setSwapReason("");
-      fetchAllData();
-    } catch (err) {
-      console.error(err);
-      Alert.alert("Error", "Failed to create swap request");
+      })
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)
+      Alert.alert("Request Sent", "Your shift swap request has been submitted.")
+      setShowSwapModal(false)
+      setSelectedMyShift(null); setSelectedTargetShift(null); setSwapReason("")
+      fetchAllData()
+    } catch (err: any) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error)
+      Alert.alert("Error", err?.response?.data?.error || "Failed to create swap request")
     } finally {
-      setLoadingSwaps(false);
+      setLoadingSwaps(false)
     }
-  };
+  }
 
   const handleCreateTimeOff = async () => {
-    if (!startDate || !endDate) {
-      Alert.alert("Error", "Please select both dates");
-      return;
-    }
-
-    const formatDate = (date: Date) => date.toISOString().split('T')[0];
-
+    if (!startDate || !endDate) { Alert.alert("Error", "Please select both dates"); return }
+    if (endDate < startDate) { Alert.alert("Error", "End date cannot be before start date"); return }
+    const fmt = (d: Date) => d.toISOString().split("T")[0]
     try {
-      setLoading(true);
-      await api.post("/time-off-requests/create/", {
-        time_off_type: timeOffType,
-        start_date: formatDate(startDate),
-        end_date: formatDate(endDate),
-        reason: timeOffReason,
-      });
-
-      Alert.alert("Success", "Time off request submitted for approval");
-      setShowTimeOffModal(false);
-      setStartDate(null);
-      setEndDate(null);
-      setTimeOffReason("");
-      setTimeOffType("annual_leave");
-      fetchAllData();
-    } catch (err) {
-      console.error(err);
-      Alert.alert("Error", "Failed to create time off request");
+      setLoading(true)
+      await api.post("/time-off-requests/create/", { time_off_type: timeOffType, start_date: fmt(startDate), end_date: fmt(endDate), reason: timeOffReason })
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)
+      Alert.alert("Submitted", "Your time off request has been submitted for approval.")
+      setShowTimeOffModal(false)
+      setStartDate(null); setEndDate(null); setTimeOffReason(""); setTimeOffType("annual_leave")
+      fetchAllData()
+    } catch {
+      Alert.alert("Error", "Failed to create time off request")
     } finally {
-      setLoading(false);
+      setLoading(false)
     }
-  };
+  }
 
   const handleApproveSwap = async (id: number) => {
     try {
-      setLoadingSwaps(true);
-      await api.post(`/shifts/swap-requests/${id}/approve/`, {});
-      Alert.alert("Success", "Swap request approved");
-      fetchAllData();
-    } catch (err) {
-      console.error(err);
-      Alert.alert("Error", "Failed to approve swap request");
+      setLoadingSwaps(true)
+      await api.post(`/shifts/swap-requests/${id}/approve/`, {})
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)
+      Alert.alert("Approved", "Shift swap has been approved.")
+      fetchAllData()
+    } catch (err: any) {
+      Alert.alert("Error", err?.response?.data?.error || "Failed to approve swap request")
     } finally {
-      setLoadingSwaps(false);
+      setLoadingSwaps(false)
     }
-  };
+  }
 
   const handleRejectSwap = async (id: number) => {
     try {
-      setLoadingSwaps(true);
-      await api.post(`/shifts/swap-requests/${id}/reject-approval/`, {});
-      Alert.alert("Success", "Swap request rejected");
-      fetchAllData();
-    } catch (err) {
-      console.error(err);
-      Alert.alert("Error", "Failed to reject swap request");
+      setLoadingSwaps(true)
+      await api.post(`/shifts/swap-requests/${id}/reject-approval/`, {})
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning)
+      fetchAllData()
+    } catch {
+      Alert.alert("Error", "Failed to reject swap request")
     } finally {
-      setLoadingSwaps(false);
+      setLoadingSwaps(false)
     }
-  };
+  }
 
   const handleAcceptSwap = async (id: number) => {
     try {
-      setLoadingSwaps(true);
-      await api.post(`/shifts/swap-requests/${id}/accept/`, {});
-      Alert.alert("Success", "Swap request accepted");
-      fetchAllData();
-    } catch (err) {
-      console.error(err);
-      Alert.alert("Error", "Failed to accept swap request");
+      setLoadingSwaps(true)
+      await api.post(`/shifts/swap-requests/${id}/accept/`, {})
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)
+      Alert.alert("Accepted", "You've accepted the swap request. Waiting for admin approval.")
+      fetchAllData()
+    } catch {
+      Alert.alert("Error", "Failed to accept swap request")
     } finally {
-      setLoadingSwaps(false);
+      setLoadingSwaps(false)
     }
-  };
+  }
 
   const handleApproveTimeOff = async (id: number) => {
     try {
-      setLoading(true);
-      await api.post(`/time-off-requests/${id}/approve/`, {});
-      Alert.alert("Success", "Time off request approved");
-      fetchAllData();
-    } catch (err) {
-      console.error(err);
-      Alert.alert("Error", "Failed to approve time off request");
-    } finally {
-      setLoading(false);
-    }
-  };
+      setLoading(true)
+      await api.post(`/time-off-requests/${id}/approve/`, {})
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)
+      fetchAllData()
+    } catch { Alert.alert("Error", "Failed to approve time off request") } finally { setLoading(false) }
+  }
 
   const handleRejectTimeOff = async (id: number) => {
     try {
-      setLoading(true);
-      await api.post(`/time-off-requests/${id}/reject/`, {});
-      Alert.alert("Success", "Time off request rejected");
-      fetchAllData();
-    } catch (err) {
-      console.error(err);
-      Alert.alert("Error", "Failed to reject time off request");
-    } finally {
-      setLoading(false);
-    }
-  };
+      setLoading(true)
+      await api.post(`/time-off-requests/${id}/reject/`, {})
+      fetchAllData()
+    } catch { Alert.alert("Error", "Failed to reject time off request") } finally { setLoading(false) }
+  }
 
-   const isAdmin = ["admin", "admin_staff"].includes(userRole);
+  const handleCancelTimeOff = (id: number) => {
+    Alert.alert("Withdraw Request", "Are you sure you want to withdraw this time off request?", [
+      { text: "Keep", style: "cancel" },
+      { text: "Withdraw", style: "destructive", onPress: async () => {
+        try { await api.post(`/time-off-requests/${id}/cancel/`, {}); fetchAllData() }
+        catch { Alert.alert("Error", "Failed to cancel request") }
+      }},
+    ])
+  }
 
-  const formatShift = (assignment?: ShiftAssignment | null) => {
-    if (!assignment) return "";
-    return `${assignment.shift.shift_type} (${new Date(assignment.shift.start).toLocaleTimeString()} - ${new Date(assignment.shift.end).toLocaleTimeString()})`;
-  };
+  const pendingApprovals = allSwapRequests.filter((r) => r.status === "accepted")
+  const awaitingResponse = allSwapRequests.filter((r) => r.status === "pending")
 
-  if (loading) {
-    return (
-      <View className="flex-1 justify-center items-center bg-gray-100">
-        <ActivityIndicator size="large" color="#4f46e5" />
-      </View>
-    );
+  if (loading && !userRole) {
+    return <View style={styles.centered}><ActivityIndicator size="large" color={Colors.primary} /></View>
   }
 
   return (
-    <View className="flex-1 bg-gray-100">
-      <ScrollView className="flex-1 px-5 pt-10">
-        {/* Header */}
-        <Text className="text-2xl font-bold">Shift Management</Text>
-        <Text className="text-gray-600 mb-6">Manage time off and shift swaps</Text>
+    <View style={styles.container}>
+      {/* Header */}
+      <View style={styles.header}>
+        <View>
+          <Text style={styles.headerTitle}>{isAdmin ? "Requests" : "My Requests"}</Text>
+          <Text style={styles.headerSub}>
+            {isAdmin ? "Manage staff requests" : "Time off & shift swaps"}
+          </Text>
+        </View>
+        {isAdmin && pendingApprovals.length > 0 && (
+          <View style={styles.pendingBadge}>
+            <Text style={styles.pendingBadgeText}>{pendingApprovals.length} pending</Text>
+          </View>
+        )}
+      </View>
 
-        {/* Time Off Requests */}
-        <View className="rounded-2xl bg-white p-5 shadow">
-          <View className="flex-row justify-between items-center mb-3">
-            <Text className="text-xs font-semibold text-gray-500">TIME OFF REQUESTS</Text>
-            {isAdmin && <Text className="text-xs bg-indigo-100 px-2 py-1 rounded text-indigo-700">Admin</Text>}
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        refreshControl={<RefreshControl refreshing={false} onRefresh={fetchAllData} tintColor={Colors.primary} />}
+      >
+        <View style={styles.content}>
+
+          {/* ---- TIME OFF ---- */}
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Calendar size={14} color={Colors.textSecondary} strokeWidth={2} />
+              <Text style={styles.sectionTitle}>Time Off Requests</Text>
+              {isAdmin && <View style={styles.adminPill}><Text style={styles.adminPillText}>Admin</Text></View>}
+            </View>
+
+            {timeOffRequests.length === 0 ? (
+              <EmptyState icon={<Calendar size={28} color={Colors.textTertiary} strokeWidth={1.5} />} text="No time off requests" />
+            ) : (
+              timeOffRequests.map((req) => (
+                <TimeOffCard
+                  key={req.id} request={req} isAdmin={isAdmin}
+                  onApprove={() => handleApproveTimeOff(req.id)}
+                  onReject={() => handleRejectTimeOff(req.id)}
+                  onCancel={() => handleCancelTimeOff(req.id)}
+                />
+              ))
+            )}
+
+            {!isAdmin && (
+              <ActionButton icon={<Plus size={16} color="#fff" strokeWidth={2.5} />} label="Request Time Off" onPress={() => setShowTimeOffModal(true)} />
+            )}
           </View>
 
-          {timeOffRequests.length === 0 ? (
-            <Text className="text-gray-500 text-sm mb-4">No time off requests</Text>
-          ) : (
-            timeOffRequests.map((req) => (
-              <TimeOffRequestCard
-                key={req.id}
-                request={req}
-                isAdmin={isAdmin}
-                onApprove={() => handleApproveTimeOff(req.id)}
-                onReject={() => handleRejectTimeOff(req.id)}
-              />
-            ))
-          )}
+          {/* ---- SHIFT SWAPS ---- */}
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <ArrowLeftRight size={14} color={Colors.textSecondary} strokeWidth={2} />
+              <Text style={styles.sectionTitle}>Shift Swaps</Text>
+            </View>
 
-          {!isAdmin && (
-            <TouchableOpacity
-              className="mt-4 rounded-xl bg-indigo-600 py-3 items-center"
-              onPress={() => setShowTimeOffModal(true)}
-            >
-              <Text className="text-white font-semibold">Request Time Off</Text>
-            </TouchableOpacity>
-          )}
-        </View>
+            {!isAdmin ? (
+              <>
+                {/* Outgoing */}
+                <Text style={styles.subLabel}>Your Requests</Text>
+                {outgoingSwapRequests.length === 0
+                  ? <EmptyState icon={<ArrowLeftRight size={24} color={Colors.textTertiary} strokeWidth={1.5} />} text="No outgoing requests" compact />
+                  : outgoingSwapRequests.map((req) => (
+                    <SwapCard key={req.id} request={req} type="outgoing"
+                      onPress={() => setSelectedSwapDetail(req)} />
+                  ))}
 
-        {/* Shift Swap Requests */}
-        <View className="mt-6 rounded-2xl bg-white p-5 shadow mb-10">
-          <Text className="text-xs font-semibold text-gray-500 mb-3">SHIFT SWAP REQUESTS</Text>
+                <SectionDivider />
 
-          {!isAdmin ? (
-            <>
-              <Text className="font-medium text-gray-700 mb-2">Your Requests</Text>
-              {outgoingSwapRequests.length === 0 ? (
-                <Text className="text-gray-500 text-sm mb-4">No outgoing requests</Text>
-              ) : (
-                outgoingSwapRequests.map((req) => (
-                  <ShiftSwapCard
-                    key={req.id}
-                    request={req}
-                    type="outgoing"
-                    onPress={() => {
-                      setSelectedSwapDetail(req);
-                      setShowSwapDetailModal(true);
-                    }}
-                  />
-                ))
-              )}
-
-              <View className="mt-4 border-t border-gray-200 pt-4" />
-              <Text className="font-medium text-gray-700 mb-2">Requests For You</Text>
-              {incomingSwapRequests.length === 0 ? (
-                <Text className="text-gray-500 text-sm mb-4">No incoming requests</Text>
-              ) : (
-                incomingSwapRequests.map((req) => (
-                  <ShiftSwapCard
-                    key={req.id}
-                    request={req}
-                    type="incoming"
-                    onAccept={() => handleAcceptSwap(req.id)}
-                    onReject={() => {
-                      Alert.alert(
-                        "Reject Request",
-                        "Are you sure you want to reject this swap request?",
-                        [
-                          { text: "Cancel", onPress: () => {} },
-                          {
-                            text: "Reject",
-                            onPress: async () => {
-                              try {
-                                await api.post(`/shifts/swap-requests/${req.id}/reject/`, {});
-                                Alert.alert("Success", "Request rejected");
-                                fetchAllData();
-                              } catch (err) {
-                                Alert.alert("Error", "Failed to reject request");
-                              }
-                            },
-                          },
-                        ]
-                      );
-                    }}
-                    onPress={() => {
-                      setSelectedSwapDetail(req);
-                      setShowSwapDetailModal(true);
-                    }}
-                  />
-                ))
-              )}
-            </>
-          ) : (
-            <>
-              <Text className="font-medium text-gray-700 mb-2">Pending Approvals</Text>
-              {allSwapRequests.filter((r) => r.status === "accepted").length === 0 ? (
-                <Text className="text-gray-500 text-sm mb-4">No pending approvals</Text>
-              ) : (
-                allSwapRequests
-                  .filter((r) => r.status === "accepted")
-                  .map((req) => (
-                    <AdminSwapCard
-                      key={req.id}
-                      request={req}
-                      onApprove={() => handleApproveSwap(req.id)}
-                      onReject={() => handleRejectSwap(req.id)}
-                      onPress={() => {
-                        setSelectedSwapDetail(req);
-                        setShowSwapDetailModal(true);
+                {/* Incoming */}
+                <Text style={styles.subLabel}>Requests For You</Text>
+                {incomingSwapRequests.length === 0
+                  ? <EmptyState icon={<Users size={24} color={Colors.textTertiary} strokeWidth={1.5} />} text="No incoming requests" compact />
+                  : incomingSwapRequests.map((req) => (
+                    <SwapCard key={req.id} request={req} type="incoming"
+                      onPress={() => setSelectedSwapDetail(req)}
+                      onAccept={() => handleAcceptSwap(req.id)}
+                      onReject={async () => {
+                        try {
+                          await api.post(`/shifts/swap-requests/${req.id}/reject/`, {})
+                          Alert.alert("Rejected", "Swap request declined.")
+                          fetchAllData()
+                        } catch { Alert.alert("Error", "Failed to reject request") }
                       }}
                     />
-                  ))
-              )}
-            </>
-          )}
+                  ))}
 
-          {!isAdmin && (
-            <TouchableOpacity
-              className="mt-4 rounded-xl bg-indigo-600 py-3 items-center"
-              onPress={() => setShowSwapModal(true)}
-            >
-              <Text className="text-white font-semibold">Request Shift Swap</Text>
-            </TouchableOpacity>
-          )}
+                <ActionButton icon={<Plus size={16} color="#fff" strokeWidth={2.5} />} label="Request Shift Swap"
+                  onPress={() => { fetchAvailableShifts(); setShowSwapModal(true) }} />
+              </>
+            ) : (
+              <>
+                {/* Pending admin approval */}
+                <Text style={styles.subLabel}>Awaiting Your Approval</Text>
+                {pendingApprovals.length === 0
+                  ? <EmptyState icon={<CheckCircle size={24} color={Colors.textTertiary} strokeWidth={1.5} />} text="No pending approvals" compact />
+                  : pendingApprovals.map((req) => (
+                    <AdminSwapCard key={req.id} request={req} tz={tz}
+                      onPress={() => setSelectedSwapDetail(req)}
+                      onApprove={() => handleApproveSwap(req.id)}
+                      onReject={() => handleRejectSwap(req.id)}
+                      loading={loadingSwaps}
+                    />
+                  ))}
+
+                <SectionDivider />
+
+                {/* Waiting on employees */}
+                <Text style={styles.subLabel}>Awaiting Employee Response</Text>
+                {awaitingResponse.length === 0
+                  ? <EmptyState icon={<Clock size={24} color={Colors.textTertiary} strokeWidth={1.5} />} text="No requests waiting on employees" compact />
+                  : awaitingResponse.map((req) => (
+                    <TouchableOpacity key={req.id} style={styles.awaitingCard} onPress={() => setSelectedSwapDetail(req)} activeOpacity={0.8}>
+                      <View style={styles.awaitingLeft}>
+                        <Initials name={req.requester_name} size={36} />
+                        <View>
+                          <Text style={styles.awaitingNames}>{req.requester_name} → {req.target_name}</Text>
+                          <Text style={styles.awaitingShifts}>{req.requester_shift_info.shift_type} ↔ {req.target_shift_info.shift_type}</Text>
+                        </View>
+                      </View>
+                      <View style={styles.waitingBadge}>
+                        <Text style={styles.waitingBadgeText}>Waiting</Text>
+                      </View>
+                    </TouchableOpacity>
+                  ))}
+              </>
+            )}
+          </View>
+
+          <View style={{ height: 32 }} />
         </View>
       </ScrollView>
 
-      {/* Time Off Modal */}
-      <Modal visible={showTimeOffModal} transparent animationType="slide">
-        <View className="flex-1 justify-end bg-black/50">
-          <View className="bg-white rounded-t-xl p-5">
-            <View className="flex-row justify-between items-center mb-4">
-              <Text className="text-lg font-bold">Request Time Off</Text>
-              <TouchableOpacity onPress={() => setShowTimeOffModal(false)}>
-                <Text className="text-2xl">×</Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Time Off Type */}
-            <Text className="text-sm text-gray-500 mb-1">Type</Text>
-            <View className="border border-gray-300 rounded mb-3">
-              <Picker
-                selectedValue={timeOffType}
-                onValueChange={setTimeOffType}
-              >
-                <Picker.Item label="Annual Leave" value="annual_leave" />
-                <Picker.Item label="Personal Leave" value="personal_leave" />
-                <Picker.Item label="Sick Leave" value="sick_leave" />
-                <Picker.Item label="Unpaid Leave" value="unpaid_leave" />
-                <Picker.Item label="Other" value="other" />
-              </Picker>
-            </View>
-
-            {/* Start Date */}
-            <Text className="text-sm text-gray-500 mb-1">Start Date</Text>
-            <TouchableOpacity
-              onPress={() => setShowStartDatePicker(true)}
-              className="border border-gray-300 rounded px-3 py-3 mb-3 bg-blue-50"
-            >
-              <Text className="text-base text-gray-800 font-medium">
-                {startDate ? startDate.toLocaleDateString() : "Select start date"}
-              </Text>
-            </TouchableOpacity>
-
-            {showStartDatePicker && (
-              <DateTimePicker
-                value={startDate || new Date()}
-                mode="date"
-                display="default"
-                onChange={(event, selectedDate) => {
-                  setShowStartDatePicker(false);
-                  if (selectedDate) setStartDate(selectedDate);
-                }}
-              />
-            )}
-
-            {/* End Date */}
-            <Text className="text-sm text-gray-500 mb-1">End Date</Text>
-            <TouchableOpacity
-              onPress={() => setShowEndDatePicker(true)}
-              className="border border-gray-300 rounded px-3 py-3 mb-3 bg-green-50"
-            >
-              <Text className="text-base text-gray-800 font-medium">
-                {endDate ? endDate.toLocaleDateString() : "Select end date"}
-              </Text>
-            </TouchableOpacity>
-
-            {showEndDatePicker && (
-              <DateTimePicker
-                value={endDate || new Date()}
-                mode="date"
-                display="default"
-                onChange={(event, selectedDate) => {
-                  setShowEndDatePicker(false);
-                  if (selectedDate) setEndDate(selectedDate);
-                }}
-              />
-            )}
-
-            {/* Reason */}
-            <Text className="text-sm text-gray-500 mb-1">Reason (Optional)</Text>
-            <TextInput
-              placeholder="Enter reason (optional)..."
-              placeholderTextColor="#999"
-              value={timeOffReason}
-              onChangeText={setTimeOffReason}
-              multiline
-              numberOfLines={4}
-              className="border border-gray-300 rounded px-3 py-2 mb-4"
-            />
-
-            {/* Actions */}
-            <View className="flex-row gap-2">
-              <TouchableOpacity
-                className="flex-1 border border-gray-300 rounded-lg py-3 items-center"
-                onPress={() => setShowTimeOffModal(false)}
-              >
-                <Text className="font-semibold text-gray-700">Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                className="flex-1 bg-indigo-600 rounded-lg py-3 items-center"
-                onPress={handleCreateTimeOff}
-                disabled={loading}
-              >
-                <Text className="font-semibold text-white">
-                  {loading ? "Creating..." : "Submit"}
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      {/* Shift Swap Modal */}
-      <Modal visible={showSwapModal} transparent animationType="slide">
-        <View className="flex-1 justify-end bg-black/50">
-          <View className="bg-white rounded-t-xl p-5">
-            <View className="flex-row justify-between items-center mb-4">
-              <Text className="text-lg font-bold">Request Shift Swap</Text>
-              <TouchableOpacity onPress={() => setShowSwapModal(false)}>
-                <Text className="text-2xl">×</Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* My Shift */}
-            <Text className="text-sm text-gray-500 mb-1">Your Shift</Text>
-            <View className="border border-gray-300 rounded mb-3">
-              <TouchableOpacity
-                className="border border-gray-300 rounded px-3 py-3 mb-3"
-                onPress={() => setShowMyShiftPicker(true)}
-              >
-                <Text>
-                  {selectedMyShiftAssignment
-                    ? formatShift(
-                        userShifts.find(s => s.id.toString() === selectedMyShiftAssignment)
-                      )
-                    : "Select your shift"}
-                </Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Target Shift */}
-            <Text className="text-sm text-gray-500 mb-1">Target Shift</Text>
-            <View className="border border-gray-300 rounded mb-3">
-              <Picker
-                selectedValue={selectedTargetShiftAssignment}
-                onValueChange={setSelectedTargetShiftAssignment}
-              >
-                <Picker.Item label="Select target shift" value={null} />
-                {targetShifts.map((assignment: any) => (
-                  <Picker.Item
-                    key={assignment.id}
-                    label={`${assignment.shift?.shift_type || "Shift"} - ${assignment.shift?.start}`}
-                    value={assignment.id.toString()}
-                  />
-                ))}
-              </Picker>
-            </View>
-
-            {/* Reason */}
-            <Text className="text-sm text-gray-500 mb-1">Reason (Optional)</Text>
-            <TextInput
-              placeholder="Enter reason (optional)..."
-              placeholderTextColor="#999"
-              value={swapReason}
-              onChangeText={setSwapReason}
-              multiline
-              numberOfLines={4}
-              className="border border-gray-300 rounded px-3 py-2 mb-4"
-            />
-
-            {/* Actions */}
-            <View className="flex-row gap-2">
-              <TouchableOpacity
-                className="flex-1 border border-gray-300 rounded-lg py-3 items-center"
-                onPress={() => setShowSwapModal(false)}
-              >
-                <Text className="font-semibold text-gray-700">Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                className="flex-1 bg-indigo-600 rounded-lg py-3 items-center"
-                onPress={handleCreateSwap}
-                disabled={loadingSwaps}
-              >
-                <Text className="font-semibold text-white">
-                  {loadingSwaps ? "Creating..." : "Submit"}
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
       {/* Swap Detail Modal */}
-      <Modal visible={showSwapDetailModal} transparent animationType="fade">
-        <View className="flex-1 justify-center bg-black/50 px-5">
-          <View className="bg-white rounded-xl p-5">
+      <Modal visible={!!selectedSwapDetail} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHandle} />
             {selectedSwapDetail && (
               <>
-                <Text className="text-lg font-bold mb-4">Shift Swap Details</Text>
+                <Text style={styles.modalTitle}>Swap Details</Text>
+                <Text style={styles.modalStatus}>
+                  Status: <Text style={{ color: StatusColors[selectedSwapDetail.status]?.text ?? Colors.text, fontWeight: "700" }}>{selectedSwapDetail.status}</Text>
+                </Text>
 
-                <View className="mb-4">
-                  <Text className="text-sm text-gray-600 mb-2">From: {selectedSwapDetail.requester_name}</Text>
-                  <View className="bg-blue-50 p-3 rounded">
-                    <Text className="font-semibold text-blue-900">
-                      {selectedSwapDetail.requester_shift_info.shift_type}
-                    </Text>
-                    <Text className="text-sm text-blue-800">
-                      {new Date(selectedSwapDetail.requester_shift_info.start).toLocaleString()}
-                    </Text>
-                    <Text className="text-xs text-blue-700">
-                      {selectedSwapDetail.requester_shift_info.department}
-                    </Text>
+                <SwapSideCard label={`From · ${selectedSwapDetail.requester_name}`} info={selectedSwapDetail.requester_shift_info} color={Colors.primary} tz={tz} />
+                <View style={styles.swapArrow}><ArrowLeftRight size={20} color={Colors.textTertiary} strokeWidth={2} /></View>
+                <SwapSideCard label={`To · ${selectedSwapDetail.target_name}`} info={selectedSwapDetail.target_shift_info} color={Colors.success} tz={tz} />
+
+                {selectedSwapDetail.reason ? (
+                  <View style={styles.reasonBox}>
+                    <Text style={styles.reasonLabel}>Reason</Text>
+                    <Text style={styles.reasonText}>{selectedSwapDetail.reason}</Text>
                   </View>
-                </View>
+                ) : null}
 
-                <View className="mb-4">
-                  <Text className="text-sm text-gray-600 mb-2">To: {selectedSwapDetail.target_name}</Text>
-                  <View className="bg-green-50 p-3 rounded">
-                    <Text className="font-semibold text-green-900">
-                      {selectedSwapDetail.target_shift_info.shift_type}
-                    </Text>
-                    <Text className="text-sm text-green-800">
-                      {new Date(selectedSwapDetail.target_shift_info.start).toLocaleString()}
-                    </Text>
-                    <Text className="text-xs text-green-700">
-                      {selectedSwapDetail.target_shift_info.department}
-                    </Text>
-                  </View>
-                </View>
-
-                {selectedSwapDetail.reason && (
-                  <View className="mb-4 p-3 bg-gray-100 rounded">
-                    <Text className="text-xs text-gray-600 mb-1">Reason</Text>
-                    <Text className="text-sm">{selectedSwapDetail.reason}</Text>
-                  </View>
-                )}
-
-                <View className="mb-4">
-                  <Text className="text-xs text-gray-600">Status: <Text className="font-semibold text-blue-600">{selectedSwapDetail.status}</Text></Text>
-                </View>
-
-                <TouchableOpacity
-                  className="bg-indigo-600 py-3 rounded-lg items-center"
-                  onPress={() => setShowSwapDetailModal(false)}
-                >
-                  <Text className="text-white font-semibold">Close</Text>
-                </TouchableOpacity>
+                <Pressable onPress={() => setSelectedSwapDetail(null)} style={styles.closeBtn}>
+                  <Text style={styles.closeBtnText}>Close</Text>
+                </Pressable>
               </>
             )}
           </View>
         </View>
       </Modal>
+
+      {/* Time Off Modal */}
+      <Modal visible={showTimeOffModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <ScrollView style={styles.modalSheet}>
+            <View style={styles.modalHandle} />
+            <Text style={styles.modalTitle}>Request Time Off</Text>
+
+            <ModalLabel label="Leave Type" />
+            <SelectButton
+              value={LEAVE_TYPES.find((t) => t.value === timeOffType)?.label ?? ""}
+              onPress={() => setShowLeaveSheet(true)}
+            />
+            <SelectSheet
+              visible={showLeaveSheet}
+              title="Select Leave Type"
+              options={LEAVE_TYPES}
+              selected={timeOffType}
+              onSelect={(v) => { setTimeOffType(v); setShowLeaveSheet(false) }}
+              onClose={() => setShowLeaveSheet(false)}
+            />
+
+            <ModalLabel label="Start Date" />
+            <Pressable onPress={() => setShowStartPicker(true)} style={styles.dateBtn}>
+              <Calendar size={16} color={Colors.primary} strokeWidth={2} />
+              <Text style={[styles.dateBtnText, !startDate && { color: Colors.textTertiary }]}>
+                {startDate ? dayjs(startDate).format("MMM D, YYYY") : "Select start date"}
+              </Text>
+            </Pressable>
+            {showStartPicker && (
+              <DateTimePicker value={startDate || new Date()} mode="date" display="default"
+                onChange={(_, d) => { setShowStartPicker(false); if (d) setStartDate(d) }} />
+            )}
+
+            <ModalLabel label="End Date" />
+            <Pressable onPress={() => setShowEndPicker(true)} style={styles.dateBtn}>
+              <Calendar size={16} color={Colors.success} strokeWidth={2} />
+              <Text style={[styles.dateBtnText, !endDate && { color: Colors.textTertiary }]}>
+                {endDate ? dayjs(endDate).format("MMM D, YYYY") : "Select end date"}
+              </Text>
+            </Pressable>
+            {showEndPicker && (
+              <DateTimePicker value={endDate || new Date()} mode="date" display="default"
+                onChange={(_, d) => { setShowEndPicker(false); if (d) setEndDate(d) }} />
+            )}
+
+            <ModalLabel label="Reason (optional)" />
+            <TextInput
+              value={timeOffReason} onChangeText={setTimeOffReason}
+              placeholder="Add a note..." placeholderTextColor={Colors.textTertiary}
+              multiline style={styles.textArea}
+            />
+
+            <View style={styles.modalActions}>
+              <Pressable onPress={() => setShowTimeOffModal(false)} style={styles.cancelBtn}>
+                <Text style={styles.cancelBtnText}>Cancel</Text>
+              </Pressable>
+              <Pressable onPress={handleCreateTimeOff} disabled={loading} style={styles.submitBtn}>
+                {loading ? <ActivityIndicator color="#fff" size="small" /> : <Text style={styles.submitBtnText}>Submit</Text>}
+              </Pressable>
+            </View>
+            <View style={{ height: 32 }} />
+          </ScrollView>
+        </View>
+      </Modal>
+
+      {/* Swap Request Modal */}
+      <Modal visible={showSwapModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <ScrollView style={styles.modalSheet} keyboardShouldPersistTaps="handled">
+            <View style={styles.modalHandle} />
+            <Text style={styles.modalTitle}>Request Shift Swap</Text>
+            <Text style={styles.modalSubtitle}>Select a shift to give away and a colleague's shift you want.</Text>
+
+            <ModalLabel label="Your shift to give away" />
+            {userShifts.length === 0
+              ? <View style={styles.emptyPicker}><Text style={styles.emptyPickerText}>No upcoming shifts to swap.</Text></View>
+              : <>
+                  <SelectButton
+                    value={selectedMyShift
+                      ? (() => { const a = userShifts.find((x) => String(x.id) === selectedMyShift); return a ? `${a.shift.shift_type} · ${dayjs(a.shift.start).tz(tz).format("ddd MMM D · HH:mm")}` : "" })()
+                      : ""}
+                    placeholder="Select your shift"
+                    onPress={() => setShowMyShiftSheet(true)}
+                  />
+                  <SelectSheet
+                    visible={showMyShiftSheet}
+                    title="Your Shift to Give Away"
+                    options={userShifts.map((a) => ({
+                      value: String(a.id),
+                      label: a.shift.shift_type,
+                      sublabel: `${dayjs(a.shift.start).tz(tz).format("ddd MMM D · HH:mm")} – ${dayjs(a.shift.end).tz(tz).format("HH:mm")}`,
+                      meta: a.shift.department,
+                    }))}
+                    selected={selectedMyShift}
+                    onSelect={(v) => { setSelectedMyShift(v); setShowMyShiftSheet(false) }}
+                    onClose={() => setShowMyShiftSheet(false)}
+                  />
+                </>
+            }
+
+            <ModalLabel label="Colleague's shift you want" />
+            {targetShifts.length === 0
+              ? <View style={styles.emptyPicker}><Text style={styles.emptyPickerText}>No eligible colleague shifts available.</Text></View>
+              : <>
+                  <SelectButton
+                    value={selectedTargetShift
+                      ? (() => { const a = targetShifts.find((x) => String(x.id) === selectedTargetShift); return a ? `${a.employee_name ?? "Colleague"} · ${a.shift.shift_type} · ${dayjs(a.shift.start).tz(tz).format("ddd MMM D · HH:mm")}` : "" })()
+                      : ""}
+                    placeholder="Select colleague's shift"
+                    onPress={() => setShowTargetShiftSheet(true)}
+                  />
+                  <SelectSheet
+                    visible={showTargetShiftSheet}
+                    title="Colleague's Shift You Want"
+                    options={targetShifts.map((a) => ({
+                      value: String(a.id),
+                      label: `${a.employee_name ?? "Colleague"} · ${a.shift.shift_type}`,
+                      sublabel: `${dayjs(a.shift.start).tz(tz).format("ddd MMM D · HH:mm")} – ${dayjs(a.shift.end).tz(tz).format("HH:mm")}`,
+                      meta: a.shift.department,
+                    }))}
+                    selected={selectedTargetShift}
+                    onSelect={(v) => { setSelectedTargetShift(v); setShowTargetShiftSheet(false) }}
+                    onClose={() => setShowTargetShiftSheet(false)}
+                  />
+                </>
+            }
+
+            <ModalLabel label="Reason (optional)" />
+            <TextInput
+              value={swapReason} onChangeText={setSwapReason}
+              placeholder="Why do you want to swap?" placeholderTextColor={Colors.textTertiary}
+              multiline style={styles.textArea}
+            />
+
+            <View style={styles.modalActions}>
+              <Pressable onPress={() => setShowSwapModal(false)} style={styles.cancelBtn}>
+                <Text style={styles.cancelBtnText}>Cancel</Text>
+              </Pressable>
+              <Pressable onPress={handleCreateSwap} disabled={loadingSwaps || !selectedMyShift || !selectedTargetShift}
+                style={[styles.submitBtn, (!selectedMyShift || !selectedTargetShift) && { opacity: 0.5 }]}>
+                {loadingSwaps ? <ActivityIndicator color="#fff" size="small" /> : <Text style={styles.submitBtnText}>Send Request</Text>}
+              </Pressable>
+            </View>
+            <View style={{ height: 32 }} />
+          </ScrollView>
+        </View>
+      </Modal>
     </View>
-  );
+  )
 }
 
-// Components
-interface TimeOffRequestCardProps {
-  request: TimeOffRequest;
-  isAdmin: boolean;
-  onApprove: () => void;
-  onReject: () => void;
+// ─── Sub-components ────────────────────────────────────────────────────────────
+
+function EmptyState({ icon, text, compact }: { icon: React.ReactNode; text: string; compact?: boolean }) {
+  return (
+    <View style={[styles.emptyState, compact && styles.emptyStateCompact]}>
+      {icon}
+      <Text style={styles.emptyStateText}>{text}</Text>
+    </View>
+  )
 }
 
-function TimeOffRequestCard({ request, isAdmin, onApprove, onReject }: TimeOffRequestCardProps) {
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case "approved":
-        return "bg-green-100 text-green-800";
-      case "rejected":
-        return "bg-red-100 text-red-800";
-      case "pending":
-        return "bg-yellow-100 text-yellow-800";
-      default:
-        return "bg-gray-100 text-gray-800";
-    }
-  };
+function ActionButton({ icon, label, onPress }: { icon: React.ReactNode; label: string; onPress: () => void }) {
+  return (
+    <TouchableOpacity onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); onPress() }} style={styles.actionBtn} activeOpacity={0.85}>
+      {icon}
+      <Text style={styles.actionBtnText}>{label}</Text>
+    </TouchableOpacity>
+  )
+}
+
+const LEAVE_TYPES = [
+  { value: "annual_leave", label: "Annual Leave", sublabel: "Paid time off for holidays or personal use" },
+  { value: "personal_leave", label: "Personal Leave", sublabel: "For personal matters or appointments" },
+  { value: "sick_leave", label: "Sick Leave", sublabel: "When you're unwell and unable to work" },
+  { value: "unpaid_leave", label: "Unpaid Leave", sublabel: "Approved leave without pay" },
+  { value: "other", label: "Other", sublabel: "Other leave type" },
+]
+
+function ModalLabel({ label }: { label: string }) {
+  return <Text style={styles.modalLabel}>{label}</Text>
+}
+
+function SelectButton({ value, placeholder = "Select an option", onPress }: {
+  value: string; placeholder?: string; onPress: () => void
+}) {
+  const hasValue = !!value
+  return (
+    <Pressable onPress={onPress} style={styles.selectBtn}>
+      <Text style={[styles.selectBtnText, !hasValue && styles.selectBtnPlaceholder]} numberOfLines={1}>
+        {hasValue ? value : placeholder}
+      </Text>
+      <ChevronDown size={16} color={Colors.textTertiary} strokeWidth={2} />
+    </Pressable>
+  )
+}
+
+const SCREEN_HEIGHT = Dimensions.get("window").height
+
+function SelectSheet({ visible, title, options, selected, onSelect, onClose, searchable }: {
+  visible: boolean
+  title: string
+  options: { value: string; label: string; sublabel?: string; meta?: string }[]
+  selected: string | null
+  onSelect: (value: string) => void
+  onClose: () => void
+  searchable?: boolean
+}) {
+  const [query, setQuery] = useState("")
+  const filtered = query.trim()
+    ? options.filter((o) =>
+        o.label.toLowerCase().includes(query.toLowerCase()) ||
+        o.sublabel?.toLowerCase().includes(query.toLowerCase()) ||
+        o.meta?.toLowerCase().includes(query.toLowerCase())
+      )
+    : options
 
   return (
-    <View className="mb-3 p-3 border border-gray-200 rounded-lg">
-      <View className="flex-row justify-between items-start mb-2">
-        <View className="flex-1">
-          <Text className="font-semibold text-gray-900">{request.time_off_type.replace("_", " ").toUpperCase()}</Text>
-          <Text className="text-sm text-gray-600">
-            {request.start_date} to {request.end_date}
-          </Text>
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <Pressable style={styles.sheetOverlay} onPress={onClose}>
+        <Pressable style={styles.sheetContainer} onPress={() => {}}>
+          <View style={styles.sheetHandle} />
+          <View style={styles.sheetHeader}>
+            <Text style={styles.sheetTitle}>{title}</Text>
+            <Text style={styles.sheetCount}>{filtered.length} option{filtered.length !== 1 ? "s" : ""}</Text>
+          </View>
+
+          {(searchable || options.length > 5) && (
+            <View style={styles.sheetSearch}>
+              <TextInput
+                value={query}
+                onChangeText={setQuery}
+                placeholder="Search..."
+                placeholderTextColor={Colors.textTertiary}
+                style={styles.sheetSearchInput}
+                autoCorrect={false}
+              />
+            </View>
+          )}
+
+          <FlatList
+            data={filtered}
+            keyExtractor={(item) => item.value}
+            style={{ maxHeight: SCREEN_HEIGHT * 0.45 }}
+            keyboardShouldPersistTaps="handled"
+            ListEmptyComponent={
+              <View style={styles.sheetEmpty}>
+                <Text style={styles.sheetEmptyText}>No matches for "{query}"</Text>
+              </View>
+            }
+            renderItem={({ item }) => {
+              const isSelected = selected === item.value
+              return (
+                <TouchableOpacity
+                  onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); onSelect(item.value) }}
+                  style={[styles.sheetOption, isSelected && styles.sheetOptionSelected]}
+                  activeOpacity={0.75}
+                >
+                  <View style={styles.sheetOptionBody}>
+                    <Text style={[styles.sheetOptionLabel, isSelected && styles.sheetOptionLabelSelected]}>
+                      {item.label}
+                    </Text>
+                    {item.sublabel ? <Text style={styles.sheetOptionSublabel} numberOfLines={2}>{item.sublabel}</Text> : null}
+                    {item.meta ? <Text style={styles.sheetOptionMeta}>{item.meta}</Text> : null}
+                  </View>
+                  {isSelected && <CheckCircle size={18} color={Colors.primary} strokeWidth={2} />}
+                </TouchableOpacity>
+              )
+            }}
+            ItemSeparatorComponent={() => <View style={styles.sheetSeparator} />}
+          />
+
+          <Pressable onPress={onClose} style={styles.sheetCancelBtn}>
+            <Text style={styles.cancelBtnText}>Cancel</Text>
+          </Pressable>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  )
+}
+
+function TimeOffCard({ request, isAdmin, onApprove, onReject, onCancel }: {
+  request: TimeOffRequest; isAdmin: boolean
+  onApprove: () => void; onReject: () => void; onCancel: () => void
+}) {
+  const typeLabel = request.time_off_type.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+  return (
+    <View style={styles.requestCard}>
+      <View style={styles.requestCardTop}>
+        <View style={styles.requestCardLeft}>
+          {isAdmin && <Text style={styles.requestEmployee}>{request.employee_name}</Text>}
+          <Text style={styles.requestType}>{typeLabel}</Text>
+          <Text style={styles.requestDates}>{request.start_date} → {request.end_date}</Text>
+          {request.reason ? <Text style={styles.requestReason}>{request.reason}</Text> : null}
         </View>
-        <View className={`px-2 py-1 rounded ${getStatusColor(request.status)}`}>
-          <Text className="text-xs font-semibold">{request.status}</Text>
-        </View>
+        <StatusBadge status={request.status} />
       </View>
-
-      {request.reason && (
-        <Text className="text-sm text-gray-600 mb-2">{request.reason}</Text>
-      )}
-
       {isAdmin && request.status === "pending" && (
-        <View className="flex-row gap-2 mt-2">
-          <TouchableOpacity
-            className="flex-1 bg-green-600 py-2 rounded items-center"
-            onPress={onApprove}
-          >
-            <Text className="text-white text-sm font-semibold">Approve</Text>
+        <View style={styles.requestActions}>
+          <TouchableOpacity onPress={onApprove} style={styles.approveBtn}>
+            <CheckCircle size={15} color="#fff" strokeWidth={2} />
+            <Text style={styles.approveBtnText}>Approve</Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            className="flex-1 bg-red-600 py-2 rounded items-center"
-            onPress={onReject}
-          >
-            <Text className="text-white text-sm font-semibold">Reject</Text>
+          <TouchableOpacity onPress={onReject} style={styles.rejectBtn}>
+            <XCircle size={15} color="#fff" strokeWidth={2} />
+            <Text style={styles.rejectBtnText}>Reject</Text>
           </TouchableOpacity>
         </View>
       )}
+      {!isAdmin && request.status === "pending" && (
+        <TouchableOpacity onPress={onCancel} style={styles.withdrawBtn}>
+          <Text style={styles.withdrawBtnText}>Withdraw Request</Text>
+        </TouchableOpacity>
+      )}
     </View>
-  );
+  )
 }
 
-interface ShiftSwapCardProps {
-  request: ShiftSwapRequest;
-  type: "incoming" | "outgoing";
-  onPress?: () => void;
-  onAccept?: () => void;
-  onReject?: () => void;
-}
-
-function ShiftSwapCard({ request, type, onPress, onAccept, onReject }: ShiftSwapCardProps) {
+function SwapCard({ request, type, onPress, onAccept, onReject }: {
+  request: ShiftSwapRequest; type: "incoming" | "outgoing"
+  onPress?: () => void; onAccept?: () => void; onReject?: () => void
+}) {
   return (
-    <TouchableOpacity
-      className="mb-3 p-3 border border-gray-200 rounded-lg active:bg-gray-50"
-      onPress={onPress}
-    >
-      <View className="flex-row justify-between items-start mb-2">
-        <View className="flex-1">
-          <Text className="font-semibold text-gray-900">
-            {type === "incoming"
-              ? `${request.requester_name} → You`
-              : `You → ${request.target_name}`}
-          </Text>
-          <Text className="text-sm text-gray-600">
-            {request.requester_shift_info.shift_type} ↔ {request.target_shift_info.shift_type}
-          </Text>
+    <TouchableOpacity onPress={onPress} style={styles.requestCard} activeOpacity={0.8}>
+      <View style={styles.requestCardTop}>
+        <View style={styles.swapNames}>
+          <Initials name={type === "incoming" ? request.requester_name : request.target_name} size={32} />
+          <View>
+            <Text style={styles.swapNameText}>
+              {type === "incoming" ? `${request.requester_name} → You` : `You → ${request.target_name}`}
+            </Text>
+            <Text style={styles.swapShiftTypes}>{request.requester_shift_info.shift_type} ↔ {request.target_shift_info.shift_type}</Text>
+          </View>
         </View>
-        <View className="bg-blue-100 px-2 py-1 rounded">
-          <Text className="text-xs font-semibold text-blue-800">{request.status}</Text>
-        </View>
+        <StatusBadge status={request.status} />
       </View>
-
       {type === "incoming" && request.status === "pending" && (
-        <View className="flex-row gap-2 mt-2">
-          <TouchableOpacity
-            className="flex-1 bg-green-600 py-2 rounded items-center"
-            onPress={onAccept}
-          >
-            <Text className="text-white text-sm font-semibold">Accept</Text>
+        <View style={styles.requestActions}>
+          <TouchableOpacity onPress={onAccept} style={styles.approveBtn}>
+            <CheckCircle size={15} color="#fff" strokeWidth={2} />
+            <Text style={styles.approveBtnText}>Accept</Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            className="flex-1 bg-red-600 py-2 rounded items-center"
-            onPress={onReject}
-          >
-            <Text className="text-white text-sm font-semibold">Reject</Text>
+          <TouchableOpacity onPress={onReject} style={styles.rejectBtn}>
+            <XCircle size={15} color="#fff" strokeWidth={2} />
+            <Text style={styles.rejectBtnText}>Reject</Text>
           </TouchableOpacity>
         </View>
       )}
+      {type === "outgoing" && (
+        <View style={styles.tapHint}>
+          <Text style={styles.tapHintText}>Tap to view details</Text>
+          <ChevronRight size={13} color={Colors.textTertiary} strokeWidth={2} />
+        </View>
+      )}
     </TouchableOpacity>
-  );
+  )
 }
 
-interface AdminSwapCardProps {
-  request: ShiftSwapRequest;
-  onApprove: () => void;
-  onReject: () => void;
-  onPress?: () => void;
-}
-
-function AdminSwapCard({ request, onApprove, onReject, onPress }: AdminSwapCardProps) {
+function AdminSwapCard({ request, tz, onPress, onApprove, onReject, loading }: {
+  request: ShiftSwapRequest; tz: string; onPress: () => void; onApprove: () => void; onReject: () => void; loading: boolean
+}) {
   return (
-    <TouchableOpacity
-      className="mb-3 p-3 border border-gray-200 rounded-lg active:bg-gray-50"
-      onPress={onPress}
-    >
-      <View className="flex-row justify-between items-start mb-2">
-        <View className="flex-1">
-          <Text className="font-semibold text-gray-900">
-            {request.requester_name} ↔ {request.target_name}
-          </Text>
-          <Text className="text-sm text-gray-600">
-            {request.requester_shift_info.shift_type} ↔ {request.target_shift_info.shift_type}
-          </Text>
+    <TouchableOpacity onPress={onPress} style={[styles.requestCard, styles.adminSwapCard]} activeOpacity={0.8}>
+      <View style={styles.adminSwapStripe} />
+      <View style={styles.adminSwapBody}>
+        <View style={styles.adminSwapNames}>
+          <Initials name={request.requester_name} size={34} />
+          <View>
+            <Text style={styles.adminSwapNameText}>{request.requester_name} ↔ {request.target_name}</Text>
+            <Text style={styles.swapShiftTypes}>{request.requester_shift_info.shift_type} ↔ {request.target_shift_info.shift_type}</Text>
+            <Text style={styles.swapDate}>{dayjs(request.requester_shift_info.start).tz(tz).format("ddd MMM D")}</Text>
+          </View>
         </View>
-        <View className="bg-orange-100 px-2 py-1 rounded">
-          <Text className="text-xs font-semibold text-orange-800">Accepted</Text>
+        <View style={styles.requestActions}>
+          <TouchableOpacity onPress={onApprove} disabled={loading} style={styles.approveBtn}>
+            <CheckCircle size={15} color="#fff" strokeWidth={2} />
+            <Text style={styles.approveBtnText}>Approve</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={onReject} disabled={loading} style={styles.rejectBtn}>
+            <XCircle size={15} color="#fff" strokeWidth={2} />
+            <Text style={styles.rejectBtnText}>Reject</Text>
+          </TouchableOpacity>
         </View>
-      </View>
-
-      <View className="flex-row gap-2 mt-2">
-        <TouchableOpacity
-          className="flex-1 bg-green-600 py-2 rounded items-center"
-          onPress={onApprove}
-        >
-          <Text className="text-white text-sm font-semibold">Approve</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          className="flex-1 bg-red-600 py-2 rounded items-center"
-          onPress={onReject}
-        >
-          <Text className="text-white text-sm font-semibold">Reject</Text>
-        </TouchableOpacity>
       </View>
     </TouchableOpacity>
-  );
+  )
 }
 
-function RequestRow({ title, subtitle, status }: { title: string; subtitle: string; status: string }) {
+function SwapSideCard({ label, info, color, tz }: { label: string; info: any; color: string; tz: string }) {
   return (
-    <View className="mb-3 flex-row justify-between items-center">
-      <View>
-        <Text className="font-medium">{title}</Text>
-        <Text className="text-gray-500 text-xs">{subtitle}</Text>
-      </View>
-
-      <Text className="text-sm font-medium text-indigo-600">{status}</Text>
+    <View style={[styles.swapSideCard, { borderLeftColor: color }]}>
+      <Text style={[styles.swapSideLabel, { color }]}>{label}</Text>
+      <Text style={styles.swapSideType}>{info.shift_type}</Text>
+      <Text style={styles.swapSideTime}>{dayjs(info.start).tz(tz).format("ddd MMM D · HH:mm")} – {dayjs(info.end).tz(tz).format("HH:mm")}</Text>
+      <Text style={styles.swapSideDept}>{info.department}</Text>
     </View>
-  );
+  )
 }
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: Colors.background },
+  centered: { flex: 1, justifyContent: "center", alignItems: "center" },
+  header: {
+    paddingTop: 56, paddingBottom: 16, paddingHorizontal: 20,
+    backgroundColor: Colors.card, borderBottomWidth: 1, borderBottomColor: Colors.border,
+    flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end",
+  },
+  headerTitle: { fontSize: 26, fontWeight: "700", color: Colors.text, letterSpacing: -0.5 },
+  headerSub: { fontSize: 13, color: Colors.textSecondary, marginTop: 2 },
+  pendingBadge: { backgroundColor: Colors.warningLight, borderRadius: 20, paddingHorizontal: 10, paddingVertical: 4 },
+  pendingBadgeText: { fontSize: 12, fontWeight: "700", color: Colors.warning },
+  content: { padding: 16 },
+  section: { backgroundColor: Colors.card, borderRadius: 20, padding: 16, marginBottom: 16, ...Shadow.sm },
+  sectionHeader: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 14 },
+  sectionTitle: { flex: 1, fontSize: 13, fontWeight: "700", color: Colors.text, textTransform: "uppercase", letterSpacing: 0.4 },
+  adminPill: { backgroundColor: Colors.primaryLight, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 20 },
+  adminPillText: { fontSize: 11, fontWeight: "600", color: Colors.primary },
+  subLabel: { fontSize: 12, fontWeight: "600", color: Colors.textSecondary, marginBottom: 8, paddingHorizontal: 2 },
+  sectionDivider: { height: 1, backgroundColor: Colors.border, marginVertical: 14 },
+  emptyState: { alignItems: "center", padding: 24, gap: 8 },
+  emptyStateCompact: { padding: 16 },
+  emptyStateText: { fontSize: 13, color: Colors.textSecondary },
+  actionBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: Colors.primary, borderRadius: 12, paddingVertical: 13, marginTop: 12, ...Shadow.sm },
+  actionBtnText: { color: "#fff", fontWeight: "600", fontSize: 14 },
+  requestCard: { backgroundColor: Colors.background, borderRadius: 12, padding: 14, marginBottom: 8, borderWidth: 1, borderColor: Colors.border },
+  requestCardTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
+  requestCardLeft: { flex: 1, marginRight: 10 },
+  requestEmployee: { fontSize: 11, color: Colors.textTertiary, fontWeight: "500", marginBottom: 2 },
+  requestType: { fontSize: 15, fontWeight: "700", color: Colors.text },
+  requestDates: { fontSize: 13, color: Colors.textSecondary, marginTop: 3 },
+  requestReason: { fontSize: 12, color: Colors.textSecondary, marginTop: 4, fontStyle: "italic" },
+  requestActions: { flexDirection: "row", gap: 8, marginTop: 12 },
+  approveBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, backgroundColor: Colors.success, borderRadius: 10, paddingVertical: 10 },
+  approveBtnText: { color: "#fff", fontWeight: "700", fontSize: 13 },
+  rejectBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, backgroundColor: Colors.error, borderRadius: 10, paddingVertical: 10 },
+  rejectBtnText: { color: "#fff", fontWeight: "700", fontSize: 13 },
+  withdrawBtn: { marginTop: 10, borderWidth: 1, borderColor: Colors.error, borderRadius: 10, paddingVertical: 9, alignItems: "center" },
+  withdrawBtnText: { color: Colors.error, fontWeight: "600", fontSize: 13 },
+  badge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20 },
+  badgeText: { fontSize: 11, fontWeight: "700" },
+  initialsCircle: { backgroundColor: Colors.primaryLight, alignItems: "center", justifyContent: "center" },
+  initialsText: { fontSize: 13, fontWeight: "700", color: Colors.primary },
+  swapNames: { flexDirection: "row", alignItems: "center", gap: 10, flex: 1, marginRight: 10 },
+  swapNameText: { fontSize: 14, fontWeight: "600", color: Colors.text },
+  swapShiftTypes: { fontSize: 12, color: Colors.textSecondary, marginTop: 2 },
+  swapDate: { fontSize: 11, color: Colors.textTertiary, marginTop: 1 },
+  tapHint: { flexDirection: "row", alignItems: "center", marginTop: 8, gap: 2 },
+  tapHintText: { fontSize: 11, color: Colors.textTertiary },
+  awaitingCard: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", backgroundColor: Colors.background, borderRadius: 12, padding: 14, marginBottom: 8, borderWidth: 1, borderColor: Colors.border },
+  awaitingLeft: { flexDirection: "row", alignItems: "center", gap: 10, flex: 1 },
+  awaitingNames: { fontSize: 13, fontWeight: "600", color: Colors.text },
+  awaitingShifts: { fontSize: 12, color: Colors.textSecondary, marginTop: 2 },
+  waitingBadge: { backgroundColor: Colors.warningLight, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20 },
+  waitingBadgeText: { fontSize: 11, fontWeight: "700", color: Colors.warning },
+  adminSwapCard: { padding: 0, overflow: "hidden", flexDirection: "row" },
+  adminSwapStripe: { width: 4, backgroundColor: Colors.warning },
+  adminSwapBody: { flex: 1, padding: 14 },
+  adminSwapNames: { flexDirection: "row", alignItems: "flex-start", gap: 10, marginBottom: 2 },
+  adminSwapNameText: { fontSize: 14, fontWeight: "700", color: Colors.text },
+  // Modal
+  modalOverlay: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(0,0,0,0.45)" },
+  modalSheet: { backgroundColor: Colors.card, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, maxHeight: "90%" },
+  modalHandle: { width: 40, height: 4, backgroundColor: Colors.border, borderRadius: 2, alignSelf: "center", marginBottom: 20 },
+  modalTitle: { fontSize: 20, fontWeight: "700", color: Colors.text, letterSpacing: -0.3, marginBottom: 4 },
+  modalSubtitle: { fontSize: 13, color: Colors.textSecondary, marginBottom: 20 },
+  modalStatus: { fontSize: 13, color: Colors.textSecondary, marginBottom: 16 },
+  modalLabel: { fontSize: 12, fontWeight: "600", color: Colors.textSecondary, marginBottom: 6, marginTop: 14 },
+  emptyPicker: { borderWidth: 1.5, borderColor: Colors.border, borderRadius: 12, padding: 14, backgroundColor: Colors.background },
+  emptyPickerText: { color: Colors.textSecondary, fontSize: 13 },
+  dateBtn: { flexDirection: "row", alignItems: "center", gap: 10, borderWidth: 1.5, borderColor: Colors.border, borderRadius: 12, padding: 13, backgroundColor: Colors.background },
+  dateBtnText: { fontSize: 15, color: Colors.text, fontWeight: "500" },
+  textArea: { borderWidth: 1.5, borderColor: Colors.border, borderRadius: 12, padding: 12, fontSize: 15, color: Colors.text, minHeight: 80, textAlignVertical: "top", backgroundColor: Colors.background },
+  modalActions: { flexDirection: "row", gap: 10, marginTop: 24 },
+  cancelBtn: { flex: 1, borderWidth: 1.5, borderColor: Colors.border, borderRadius: 12, paddingVertical: 14, alignItems: "center" },
+  cancelBtnText: { fontWeight: "600", color: Colors.textSecondary, fontSize: 15 },
+  submitBtn: { flex: 1, backgroundColor: Colors.primary, borderRadius: 12, paddingVertical: 14, alignItems: "center" },
+  submitBtnText: { color: "#fff", fontWeight: "700", fontSize: 15 },
+  closeBtn: { backgroundColor: Colors.primary, borderRadius: 12, paddingVertical: 14, alignItems: "center", marginTop: 20 },
+  closeBtnText: { color: "#fff", fontWeight: "700", fontSize: 15 },
+  swapArrow: { alignItems: "center", marginVertical: 8 },
+  swapSideCard: { borderLeftWidth: 3, borderRadius: 10, padding: 12, backgroundColor: Colors.background, marginBottom: 4 },
+  swapSideLabel: { fontSize: 11, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 },
+  swapSideType: { fontSize: 15, fontWeight: "700", color: Colors.text },
+  swapSideTime: { fontSize: 13, color: Colors.textSecondary, marginTop: 2 },
+  swapSideDept: { fontSize: 12, color: Colors.textTertiary, marginTop: 2 },
+  reasonBox: { backgroundColor: Colors.background, borderRadius: 10, padding: 12, marginTop: 12 },
+  reasonLabel: { fontSize: 11, color: Colors.textTertiary, fontWeight: "600", marginBottom: 4 },
+  reasonText: { fontSize: 14, color: Colors.text },
+  // SelectButton
+  selectBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    borderWidth: 1.5, borderColor: Colors.border, borderRadius: 12,
+    padding: 14, backgroundColor: Colors.background,
+  },
+  selectBtnText: { flex: 1, fontSize: 15, color: Colors.text, fontWeight: "500", marginRight: 8 },
+  selectBtnPlaceholder: { color: Colors.textTertiary, fontWeight: "400" },
+  // SelectSheet
+  sheetOverlay: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(0,0,0,0.45)" },
+  sheetContainer: { backgroundColor: Colors.card, borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingTop: 20 },
+  sheetHandle: { width: 40, height: 4, backgroundColor: Colors.border, borderRadius: 2, alignSelf: "center", marginBottom: 16 },
+  sheetHeader: { flexDirection: "row", alignItems: "baseline", justifyContent: "space-between", paddingHorizontal: 20, marginBottom: 12 },
+  sheetTitle: { fontSize: 17, fontWeight: "700", color: Colors.text },
+  sheetCount: { fontSize: 12, color: Colors.textTertiary, fontWeight: "500" },
+  sheetSearch: { marginHorizontal: 16, marginBottom: 8, borderWidth: 1.5, borderColor: Colors.border, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, backgroundColor: Colors.background },
+  sheetSearchInput: { fontSize: 15, color: Colors.text },
+  sheetOption: { flexDirection: "row", alignItems: "center", paddingVertical: 14, paddingHorizontal: 20 },
+  sheetOptionSelected: { backgroundColor: Colors.primaryLight },
+  sheetOptionBody: { flex: 1, marginRight: 12 },
+  sheetOptionLabel: { fontSize: 15, fontWeight: "600", color: Colors.text },
+  sheetOptionLabelSelected: { color: Colors.primary },
+  sheetOptionSublabel: { fontSize: 13, color: Colors.textSecondary, marginTop: 2, lineHeight: 18 },
+  sheetOptionMeta: { fontSize: 11, color: Colors.textTertiary, marginTop: 3, fontWeight: "500" },
+  sheetSeparator: { height: 1, backgroundColor: Colors.border, marginHorizontal: 20 },
+  sheetEmpty: { paddingVertical: 32, alignItems: "center" },
+  sheetEmptyText: { fontSize: 14, color: Colors.textSecondary },
+  sheetCancelBtn: { margin: 16, marginTop: 8, borderWidth: 1.5, borderColor: Colors.border, borderRadius: 12, paddingVertical: 14, alignItems: "center" },
+})
